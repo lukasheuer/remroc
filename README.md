@@ -11,17 +11,17 @@ We recommend general knowledge of ROS 2 and the components of Navigation 2 when 
 REMROC consists of multiple ROS 2 packages and can be installed simply by cloning the repository and building the packages in a ROS 2 workspace. 
 To ensure that all preconditions are met please check that your system fulfils the following prerequisites:
 
-1. installation of ROS 2 Humble - [Instructions](https://docs.ros.org/en/humble/Installation.html)
-2. installation of Gazebo Ignition (version Fortress) - [Instructions](https://gazebosim.org/docs/fortress/install)
+1. installation of ROS 2 Jazzy - [Instructions](https://docs.ros.org/en/humble/Installation.html)
+2. installation of Gazebo Harmonic - [Instructions](https://gazebosim.org/docs/fortress/install)
 3. install colcon 
 ```
 sudo apt install python3-colcon-common-extensions
 ```
 4. Either use rosdep to install the required ROS 2 packages or the following packages manually: 
 ```
-sudo apt install ros-humble-ros-ign-gazebo ros-humble-ros-gz-bridge ros-humble-navigation2 ros-humble-robot-localization
+sudo apt install ros-jazzy-ros-gz ros-jazzy-ros-gz-bridge ros-jazzy-navigation2 ros-jazzy-robot-localization
 ```
-5. Move the contents of this repository into your ROS 2 workspace, remember to source the general ROS 2 installation ```source \opt\ros\humble\setup.bash```, and build the packages with ```colcon build``` .
+5. Move the contents of this repository into your ROS 2 workspace, remember to source the general ROS 2 installation ```source \opt\ros\jazzy\setup.bash```, and build the packages with ```colcon build``` .
 
 
 ## Start an experiment
