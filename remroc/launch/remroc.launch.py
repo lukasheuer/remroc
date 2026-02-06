@@ -29,7 +29,7 @@ from launch.actions import (
         SetEnvironmentVariable,
         TimerAction,
 )
-from launch.conditions import IfCondition
+from launch.conditions import IfCondition, UnlessCondition
 from launch.event_handlers import OnExecutionComplete, OnProcessExit
 from launch.events import Shutdown
 from launch.launch_description_sources import PythonLaunchDescriptionSource
@@ -42,13 +42,14 @@ from launch.substitutions import (
 from launch_ros.actions import LifecycleNode, Node
 from launch_ros.event_handlers import OnStateTransition
 
-coordinator = 'coordinator_mapf'  # The coordinator to use for the experiment. Must match the executable name of the ros2 node.
+# coordinator_mapf, coordinator_mapf_baseline, coordinator_oru
+coordinator = 'coordinator_oru'  # The coordinator to use for the experiment. Must match the executable name of the ros2 node.
 experiment_yaml = 'exp_0_simple.yaml'  # The experiment yaml. This specifies the start and goal positions, type and id of the robots. Localted in the "params" folder.
 world_name_default = (
         'simple'  # The world name which is used. This should match the name of the maps and sdfs. as well as the world name inside the sdf. (Check simple and depot worlds for an example).
 )
 sample_default = '0'  # The sample number which is used. The samples differe in the respective trajectories of the humans. Needs to match an existing world sdf.
-number_of_humans_default = '5'  # The number of humans which populate the environment. Needs to match an existing world sdf.
+number_of_humans_default = '0'  # The number of humans which populate the environment. Needs to match an existing world sdf.
 
 use_depot_mod = False  # Wether or not to use the modified version of the depot environment, in which the "busy" area is blocked for the robots.
 
@@ -62,6 +63,12 @@ ARGUMENTS = [
                 description='Number of humans in the world.',
         ),
         DeclareLaunchArgument('sample', default_value=sample_default, description='World Sample.'),
+        DeclareLaunchArgument(
+                'use_ground_truth_position',
+                default_value='false',
+                choices=['true', 'false'],
+                description='Use the ground truth position of the robots instead of the localization and state_estimation algorithm',
+        ),
 ]
 
 
@@ -71,6 +78,7 @@ def generate_launch_description():
         number_of_humans = LaunchConfiguration('number_of_humans')
         sample = LaunchConfiguration('sample')
         coordinator_sub = TextSubstitution(text=coordinator)
+        use_gt = LaunchConfiguration('use_ground_truth_position')
         if use_depot_mod:
                 map_name = TextSubstitution(text='depot_mod')
         else:
@@ -122,16 +130,17 @@ def generate_launch_description():
                 executable='parameter_bridge',
                 name='ros_gz_bridge',
                 output='screen',
-                parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-                arguments=[
-                        [
-                                '/world/',
-                                world_name,
-                                '/clock@rosgraph_msgs/msg/Clock[gz.msgs.Clock',
-                        ],
-                ],
-                remappings=[
-                        (['/world/', world_name, '/clock'], '/clock'),
+                parameters=[
+                        #
+                        {'use_sim_time': LaunchConfiguration('use_sim_time')},
+                        {'bridge_names': ['clock_bridge']},
+                        {'bridges.clock_bridge.ros_topic_name': '/clock'},
+                        {'bridges.clock_bridge.gz_topic_name': ['/world/', world_name, '/clock']},
+                        # {'bridges.clock_bridge.gz_topic_name': '/world/simple/clock'},
+                        {'bridges.clock_bridge.ros_type_name': 'rosgraph_msgs/msg/Clock'},
+                        {'bridges.clock_bridge.gz_type_name': 'gz.msgs.Clock'},
+                        {'bridges.clock_bridge.direction': 'GZ_TO_ROS'},
+                        {'bridges.clock_bridge.lazy': False},
                 ],
         )
         ld.add_action(ros_gz_bridge)
@@ -249,6 +258,35 @@ def generate_launch_description():
                 with open(Path(pkg_remroc_robots).joinpath('config', robot_description, 'sensor_positions.yaml')) as file:
                         sensor_positions = yaml.safe_load(file)
 
+                ld.add_action(
+                        Node(
+                                package='tf2_ros',
+                                executable='static_transform_publisher',
+                                namespace=robot_name,
+                                output='screen',
+                                parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
+                                condition=IfCondition(use_gt),
+                                arguments=[
+                                        '--x',
+                                        str(robot_pose[0]),
+                                        '--y',
+                                        str(robot_pose[1]),
+                                        '--z',
+                                        '0.0',
+                                        '--yaw',
+                                        str(robot_pose[2]),
+                                        '--pitch',
+                                        '0.0',
+                                        '--roll',
+                                        '0.0',
+                                        '--frame-id',
+                                        'map',
+                                        '--child-frame-id',
+                                        'odom',
+                                ],
+                                remappings=remappings,
+                        )
+                )
                 # for each sensor specified in the sensor_positions.yaml, launch a static transform from the sensor to the base_link
                 for sensor_dict in sensor_positions.values():
                         ld.add_action(
@@ -280,8 +318,7 @@ def generate_launch_description():
                                 )
                         )
 
-                # A ros-gazebo bridge is needed for the sensor messages as well as odometry and cmd_vel topics. At the time this is still manual.
-                # TODO: Maybe automatize this, by adding another config yaml for each robot with a list of remappings.
+                robot_name_sub = TextSubstitution(text=robot_name)
                 ld.add_action(
                         Node(
                                 package='ros_gz_bridge',
@@ -289,80 +326,105 @@ def generate_launch_description():
                                 namespace=robot_name,
                                 name='ros_gz_bridge',
                                 output='screen',
-                                parameters=[{'use_sim_time': LaunchConfiguration('use_sim_time')}],
-                                arguments=[
-                                        [
-                                                '/model/',
-                                                robot_name,
-                                                '/cmd_vel@geometry_msgs/msg/Twist]gz.msgs.Twist',
-                                        ],
-                                        [
-                                                '/model/',
-                                                robot_name,
-                                                '/odometry@nav_msgs/msg/Odometry[gz.msgs.Odometry',
-                                        ],
-                                        [
-                                                '/world/',
-                                                world_name,
-                                                '/model/',
-                                                robot_name,
-                                                '/link/imu_link/sensor/imu/imu@sensor_msgs/msg/Imu[gz.msgs.IMU',
-                                        ],
-                                        [
-                                                '/world/',
-                                                world_name,
-                                                '/model/',
-                                                robot_name,
-                                                '/link/scan_omni/sensor/scan_omni/scan@sensor_msgs/msg/LaserScan[gz.msgs.LaserScan',
-                                        ],
-                                        [
-                                                '/world/',
-                                                world_name,
-                                                '/model/',
-                                                robot_name,
-                                                '/link/scan_omni/sensor/scan_omni/scan/points@sensor_msgs/msg/PointCloud2[gz.msgs.PointCloudPacked',
-                                        ],
+                                parameters=[
+                                        #
+                                        {'use_sim_time': LaunchConfiguration('use_sim_time')},
+                                        {'bridge_names': ['cmd_vel_bridge', 'odom_bridge', 'imu_bridge', 'laser_bridge', 'pointcloud_bridge']},
+                                        # --- CMD VEL ---
+                                        {'bridges.cmd_vel_bridge.ros_topic_name': ['/', robot_name_sub, '/cmd_vel']},
+                                        {'bridges.cmd_vel_bridge.gz_topic_name': ['/model/', robot_name_sub, '/cmd_vel']},
+                                        {'bridges.cmd_vel_bridge.ros_type_name': 'geometry_msgs/msg/Twist'},
+                                        {'bridges.cmd_vel_bridge.gz_type_name': 'gz.msgs.Twist'},
+                                        {'bridges.cmd_vel_bridge.direction': 'ROS_TO_GZ'},
+                                        {'bridges.cmd_vel_bridge.lazy': True},
+                                        # --- ODOMETRY ---
+                                        {'bridges.odom_bridge.ros_topic_name': ['/', robot_name_sub, '/odometry']},
+                                        {'bridges.odom_bridge.gz_topic_name': ['/model/', robot_name_sub, '/odometry']},
+                                        {'bridges.odom_bridge.ros_type_name': 'nav_msgs/msg/Odometry'},
+                                        {'bridges.odom_bridge.gz_type_name': 'gz.msgs.Odometry'},
+                                        {'bridges.odom_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.odom_bridge.lazy': False},
+                                        # --- IMU ---
+                                        {'bridges.imu_bridge.ros_topic_name': ['/', robot_name_sub, '/imu']},
+                                        {'bridges.imu_bridge.gz_topic_name': ['/world/', world_name, '/model/', robot_name_sub, '/link/imu_link/sensor/imu/imu']},
+                                        {'bridges.imu_bridge.ros_type_name': 'sensor_msgs/msg/Imu'},
+                                        {'bridges.imu_bridge.gz_type_name': 'gz.msgs.IMU'},
+                                        {'bridges.imu_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.imu_bridge.lazy': False},
+                                        # --- LASER SCAN ---
+                                        {'bridges.laser_bridge.ros_topic_name': ['/', robot_name_sub, '/laser_scan']},
+                                        {'bridges.laser_bridge.gz_topic_name': ['/world/', world_name, '/model/', robot_name_sub, '/link/scan_omni/sensor/scan_omni/scan']},
+                                        {'bridges.laser_bridge.ros_type_name': 'sensor_msgs/msg/LaserScan'},
+                                        {'bridges.laser_bridge.gz_type_name': 'gz.msgs.LaserScan'},
+                                        {'bridges.laser_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.laser_bridge.lazy': False},
+                                        # --- POINT CLOUD ---
+                                        {'bridges.pointcloud_bridge.ros_topic_name': ['/', robot_name_sub, '/point_cloud']},
+                                        {'bridges.pointcloud_bridge.gz_topic_name': ['/world/', world_name, '/model/', robot_name_sub, '/link/scan_omni/sensor/scan_omni/scan/points']},
+                                        {'bridges.pointcloud_bridge.ros_type_name': 'sensor_msgs/msg/PointCloud2'},
+                                        {'bridges.pointcloud_bridge.gz_type_name': 'gz.msgs.PointCloudPacked'},
+                                        {'bridges.pointcloud_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.pointcloud_bridge.lazy': False},
                                 ],
-                                remappings=[
-                                        (
-                                                ['/model/', robot_name, '/cmd_vel'],
-                                                ['/', robot_name, '/cmd_vel'],
-                                        ),
-                                        (
-                                                ['/model/', robot_name, '/odometry'],
-                                                ['/', robot_name, '/odometry'],
-                                        ),
-                                        (
-                                                [
-                                                        '/world/',
-                                                        world_name,
-                                                        '/model/',
-                                                        robot_name,
-                                                        '/link/imu_link/sensor/imu/imu',
-                                                ],
-                                                ['/', robot_name, '/imu'],
-                                        ),
-                                        (
-                                                [
-                                                        '/world/',
-                                                        world_name,
-                                                        '/model/',
-                                                        robot_name,
-                                                        '/link/scan_omni/sensor/scan_omni/scan',
-                                                ],
-                                                ['/', robot_name, '/laser_scan'],
-                                        ),
-                                        (
-                                                [
-                                                        '/world/',
-                                                        world_name,
-                                                        '/model/',
-                                                        robot_name,
-                                                        '/link/scan_omni/sensor/scan_omni/scan/points',
-                                                ],
-                                                ['/', robot_name, '/point_cloud'],
-                                        ),
+                                condition=UnlessCondition(use_gt),
+                        )
+                )
+
+                ld.add_action(
+                        Node(
+                                package='ros_gz_bridge',
+                                executable='parameter_bridge',
+                                namespace=robot_name,
+                                name='ros_gz_bridge_gt',
+                                output='screen',
+                                parameters=[
+                                        #
+                                        {'use_sim_time': LaunchConfiguration('use_sim_time')},
+                                        {'bridge_names': ['cmd_vel_bridge', 'odom_bridge', 'pose_bridge', 'imu_bridge', 'laser_bridge', 'pointcloud_bridge']},
+                                        # --- CMD VEL ---
+                                        {'bridges.cmd_vel_bridge.ros_topic_name': ['/', robot_name_sub, '/cmd_vel']},
+                                        {'bridges.cmd_vel_bridge.gz_topic_name': ['/model/', robot_name_sub, '/cmd_vel']},
+                                        {'bridges.cmd_vel_bridge.ros_type_name': 'geometry_msgs/msg/Twist'},
+                                        {'bridges.cmd_vel_bridge.gz_type_name': 'gz.msgs.Twist'},
+                                        {'bridges.cmd_vel_bridge.direction': 'ROS_TO_GZ'},
+                                        {'bridges.cmd_vel_bridge.lazy': True},
+                                        # --- ODOMETRY ---
+                                        {'bridges.odom_bridge.ros_topic_name': ['/', robot_name_sub, '/odometry']},
+                                        {'bridges.odom_bridge.gz_topic_name': ['/model/', robot_name_sub, '/odometry']},
+                                        {'bridges.odom_bridge.ros_type_name': 'nav_msgs/msg/Odometry'},
+                                        {'bridges.odom_bridge.gz_type_name': 'gz.msgs.Odometry'},
+                                        {'bridges.odom_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.odom_bridge.lazy': False},
+                                        # --- POSE ---
+                                        {'bridges.odom_bridge.ros_topic_name': ['/', robot_name_sub, '/robot_state']},
+                                        {'bridges.odom_bridge.gz_topic_name': ['/model/', robot_name_sub, '/pose']},
+                                        {'bridges.odom_bridge.ros_type_name': 'geometry_msgs/msg/PoseStamped'},
+                                        {'bridges.odom_bridge.gz_type_name': 'gz.msgs.Pose'},
+                                        {'bridges.odom_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.odom_bridge.lazy': False},
+                                        # --- IMU ---
+                                        {'bridges.imu_bridge.ros_topic_name': ['/', robot_name_sub, '/imu']},
+                                        {'bridges.imu_bridge.gz_topic_name': ['/world/', world_name, '/model/', robot_name_sub, '/link/imu_link/sensor/imu/imu']},
+                                        {'bridges.imu_bridge.ros_type_name': 'sensor_msgs/msg/Imu'},
+                                        {'bridges.imu_bridge.gz_type_name': 'gz.msgs.IMU'},
+                                        {'bridges.imu_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.imu_bridge.lazy': False},
+                                        # --- LASER SCAN ---
+                                        {'bridges.laser_bridge.ros_topic_name': ['/', robot_name_sub, '/laser_scan']},
+                                        {'bridges.laser_bridge.gz_topic_name': ['/world/', world_name, '/model/', robot_name_sub, '/link/scan_omni/sensor/scan_omni/scan']},
+                                        {'bridges.laser_bridge.ros_type_name': 'sensor_msgs/msg/LaserScan'},
+                                        {'bridges.laser_bridge.gz_type_name': 'gz.msgs.LaserScan'},
+                                        {'bridges.laser_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.laser_bridge.lazy': False},
+                                        # --- POINT CLOUD ---
+                                        {'bridges.pointcloud_bridge.ros_topic_name': ['/', robot_name_sub, '/point_cloud']},
+                                        {'bridges.pointcloud_bridge.gz_topic_name': ['/world/', world_name, '/model/', robot_name_sub, '/link/scan_omni/sensor/scan_omni/scan/points']},
+                                        {'bridges.pointcloud_bridge.ros_type_name': 'sensor_msgs/msg/PointCloud2'},
+                                        {'bridges.pointcloud_bridge.gz_type_name': 'gz.msgs.PointCloudPacked'},
+                                        {'bridges.pointcloud_bridge.direction': 'GZ_TO_ROS'},
+                                        {'bridges.pointcloud_bridge.lazy': False},
                                 ],
+                                condition=IfCondition(use_gt),
                         )
                 )
 
@@ -472,6 +534,25 @@ def generate_launch_description():
                         ],
                         remappings=remappings,
                 )
+                nav2_gt_lcm = Node(  # Lifecycle manager to launch all the robot specific nodes. Make sure to add/remove any chances under "node_names"
+                        package='nav2_lifecycle_manager',
+                        executable='lifecycle_manager',
+                        namespace=robot_name,
+                        name='lifecycle_gt_manager_node',
+                        output='screen',
+                        parameters=[
+                                {'use_sim_time': LaunchConfiguration('use_sim_time')},
+                                {
+                                        'node_names': [
+                                                'controller_server_node',
+                                                'planner_server_node',
+                                                'behavior_server_node',
+                                                'bt_navigator_node',
+                                        ]
+                                },
+                                {'autostart': True},
+                        ],
+                )
                 nav2_lcm = Node(  # Lifecycle manager to launch all the robot specific nodes. Make sure to add/remove any chances under "node_names"
                         package='nav2_lifecycle_manager',
                         executable='lifecycle_manager',
@@ -493,38 +574,29 @@ def generate_launch_description():
                         ],
                 )
                 nav2_node_list = [ekf, amcl, controller, planner, behaviour_server, bt_navigator, nav2_lcm]
+                nav2_gt_node_list = [controller, planner, behaviour_server, bt_navigator, nav2_gt_lcm]
                 nav2_nodes = GroupAction(actions=nav2_node_list)
+                nav2_gt_nodes = GroupAction(actions=nav2_gt_node_list)
 
                 # Launch the nav2 nodes only after the robot has been created
                 launch_nav2_nodes = RegisterEventHandler(
-                        OnProcessExit(
+                        condition=UnlessCondition(use_gt),
+                        event_handler=OnProcessExit(
                                 target_action=robot_launch_node,
-                                # on_exit=TimerAction(
-                                #         # actions=[group_action, robot_state_publisher_node], period=1.0
-                                #         actions=[group_action],
-                                #         period=1.0,
                                 on_exit=nav2_nodes,
-                        )
+                        ),
                 )
 
                 ld.add_action(launch_nav2_nodes)
 
-                # Add robot_state publisher. This takes the /odometry/filtered topic and republishes it in the map frame on /robot_state
-                # This is required as one can not call a transform and specify a namespace for the TF tree.
-                # robot_state_publisher_node = TimerAction(
-                #     actions=[
-                #         Node(
-                #             package="remroc",
-                #             executable="robot_state_publisher",
-                #             namespace=robot_name,
-                #             name="robot_state_publisher",
-                #             output="screen",
-                #             parameters=[{"use_sim_time": LaunchConfiguration("use_sim_time")}],
-                #             remappings=remappings,
-                #         )
-                #     ],
-                #     period=5.0,
-                # )
+                launch_nav2_gt_nodes = RegisterEventHandler(
+                        condition=IfCondition(use_gt),
+                        event_handler=OnProcessExit(
+                                target_action=robot_launch_node,
+                                on_exit=nav2_gt_nodes,
+                        ),
+                )
+                ld.add_action(launch_nav2_gt_nodes)
 
                 robot_state_publisher_node = Node(
                         package='remroc',
@@ -537,13 +609,35 @@ def generate_launch_description():
                 )
 
                 launch_state_publisher = RegisterEventHandler(
-                        OnStateTransition(
+                        condition=UnlessCondition(use_gt),
+                        event_handler=OnStateTransition(
                                 target_lifecycle_node=bt_navigator,
                                 goal_state='active',
                                 entities=[robot_state_publisher_node],
+                        ),
+                )
+
+                ld.add_action(launch_state_publisher)
+
+                ld.add_action(
+                        Node(
+                                package='remroc',
+                                executable='robot_odometry_publisher',
+                                namespace=robot_name,
+                                name='robot_odometry_publisher',
+                                output='screen',
+                                condition=IfCondition(use_gt),
+                                parameters=[
+                                        {'use_sim_time': LaunchConfiguration('use_sim_time')},
+                                        {
+                                                'x': robot_pose[0],
+                                                'y': robot_pose[1],
+                                                'yaw': robot_pose[2],
+                                        },
+                                ],
+                                remappings=remappings,
                         )
                 )
-                ld.add_action(launch_state_publisher)
 
                 # The loop that launches the individual robots and their specific components ends here.
 
